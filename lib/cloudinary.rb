@@ -57,9 +57,11 @@ module Cloudinary
     "jpe" => "jpg",
     "png" => "png",
     "tif" => "tiff",
+    "tif" => "tif",
+    "ps" => "ps",
     "ps" => "eps",
     "ept" => "eps",
-    "bmp" => "bmp"
+    "eps" => "eps"
   }
 
   @@config = nil
