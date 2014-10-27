@@ -61,7 +61,8 @@ module Cloudinary
     "ps" => "ps",
     "ps" => "eps",
     "ept" => "eps",
-    "eps" => "eps"
+    "eps" => "eps",
+    "bmp" => "bmp"
   }
 
   @@config = nil
