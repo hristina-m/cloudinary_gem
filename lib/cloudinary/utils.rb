@@ -1,14 +1,16 @@
 # Copyright Cloudinary
+
+# frozen_string_literal: true
 require 'digest/sha1'
 require 'zlib'
 require 'uri'
 require 'aws_cf_signer'
 require 'json'
 require 'cgi'
-require 'cloudinary/akamai'
+require 'cloudinary/auth_token'
+require 'cloudinary/responsive'
 
 class Cloudinary::Utils
-  include Cloudinary::Akamai
   # @deprecated Use Cloudinary::SHARED_CDN
   SHARED_CDN = Cloudinary::SHARED_CDN
   DEFAULT_RESPONSIVE_WIDTH_TRANSFORMATION = {:width => :auto, :crop => :limit}
@@ -20,28 +22,153 @@ class Cloudinary::Utils
     "<=" => 'lte',
     ">=" => 'gte',
     "&&" => 'and',
-    "||" => 'or'
+    "||" => 'or',
+    "*" => 'mul',
+    "/" => 'div',
+    "+" => 'add',
+    "-" => 'sub',
+    "^" => 'pow'
   }
 
-  CONDITIONAL_PARAMETERS = {
-    "width" => "w",
-    "height" => "h",
-    "aspect_ratio" => "ar",
-    "page_count" => "pc",
-    "face_count" => "fc"
+  PREDEFINED_VARS = {
+    "aspect_ratio"         => "ar",
+    "current_page"         => "cp",
+    "face_count"           => "fc",
+    "height"               => "h",
+    "initial_aspect_ratio" => "iar",
+    "initial_height"       => "ih",
+    "initial_width"        => "iw",
+    "page_count"           => "pc",
+    "page_x"               => "px",
+    "page_y"               => "py",
+    "tags"                 => "tags",
+    "initial_duration"     => "idu",
+    "duration"             => "du",
+    "width"                => "w"
   }
+
+  SIMPLE_TRANSFORMATION_PARAMS = {
+    :ac => :audio_codec,
+    :af => :audio_frequency,
+    :br => :bit_rate,
+    :cs => :color_space,
+    :d  => :default_image,
+    :dl => :delay,
+    :dn => :density,
+    :du => :duration,
+    :eo => :end_offset,
+    :f  => :fetch_format,
+    :g  => :gravity,
+    :ki => :keyframe_interval,
+    :p  => :prefix,
+    :pg => :page,
+    :so => :start_offset,
+    :sp => :streaming_profile,
+    :vc => :video_codec,
+    :vs => :video_sampling
+  }.freeze
+
+  URL_KEYS = %w[
+      api_secret
+      auth_token
+      cdn_subdomain
+      cloud_name
+      cname
+      format
+      private_cdn
+      resource_type
+      secure
+      secure_cdn_subdomain
+      secure_distribution
+      shorten
+      sign_url
+      ssl_detected
+      type
+      url_suffix
+      use_root_path
+      version
+  ].map(&:to_sym)
+
+
+  TRANSFORMATION_PARAMS = %w[
+      angle
+      aspect_ratio
+      audio_codec
+      audio_frequency
+      background
+      bit_rate
+      border
+      color
+      color_space
+      crop
+      custom_function
+      default_image
+      delay
+      density
+      dpr
+      duration
+      effect
+      end_offset
+      fetch_format
+      flags
+      fps
+      gravity
+      height
+      if
+      keyframe_interval
+      offset
+      opacity
+      overlay
+      page
+      prefix
+      quality
+      radius
+      raw_transformation
+      responsive_width
+      size
+      start_offset
+      streaming_profile
+      transformation
+      underlay
+      variables
+      video_codec
+      video_sampling
+      width
+      x
+      y
+      zoom
+  ].map(&:to_sym)
+
+  REMOTE_URL_REGEX = %r(^ftp:|^https?:|^s3:|^gs:|^data:([\w-]+\/[\w-]+)?(;[\w-]+=[\w-]+)*;base64,([a-zA-Z0-9\/+\n=]+)$)
+
+  def self.extract_config_params(options)
+      options.select{|k,v| URL_KEYS.include?(k)}
+  end
+
+  def self.extract_transformation_params(options)
+    options.select{|k,v| TRANSFORMATION_PARAMS.include?(k)}
+  end
+
+  def self.chain_transformation(options, *transformation)
+    base_options = extract_config_params(options)
+    transformation = transformation.reject(&:nil?)
+    base_options[:transformation] = build_array(extract_transformation_params(options)).concat(transformation)
+    base_options
+  end
+
+
   # Warning: options are being destructively updated!
   def self.generate_transformation_string(options={}, allow_implicit_crop_mode = false)
     # allow_implicit_crop_mode was added to support height and width parameters without specifying a crop mode.
     # This only apply to this (cloudinary_gem) SDK
 
     if options.is_a?(Array)
-      return options.map{|base_transformation| generate_transformation_string(base_transformation.clone, allow_implicit_crop_mode)}.join("/")
+      return options.map{|base_transformation| generate_transformation_string(base_transformation.clone, allow_implicit_crop_mode)}.reject(&:blank?).join("/")
     end
 
     symbolize_keys!(options)
 
-    responsive_width = config_option_consume(options, :responsive_width) 
+    responsive_width = config_option_consume(options, :responsive_width)
     size = options.delete(:size)
     options[:width], options[:height] = size.split("x") if size
     width = options[:width]
@@ -92,52 +219,40 @@ class Cloudinary::Utils
       options[:start_offset], options[:end_offset] = split_range options.delete(:offset)
     end
 
+    fps = options.delete(:fps)
+    fps = fps.join('-') if fps.is_a? Array
+
     overlay = process_layer(options.delete(:overlay))
     underlay = process_layer(options.delete(:underlay))
     ifValue = process_if(options.delete(:if))
+    custom_function = process_custom_function(options.delete(:custom_function))
+    custom_pre_function = process_custom_pre_function(options.delete(:custom_pre_function))
 
     params = {
-      :a   => angle,
+      :a   => normalize_expression(angle),
+      :ar => normalize_expression(options.delete(:aspect_ratio)),
       :b   => background,
       :bo  => border,
       :c   => crop,
       :co  => color,
-      :dpr => dpr,
-      :e   => effect,
+      :dpr => normalize_expression(dpr),
+      :e   => normalize_expression(effect),
       :fl  => flags,
-      :h   => height,
+      :fn  => custom_function || custom_pre_function,
+      :fps => fps,
+      :h   => normalize_expression(height),
       :l  => overlay,
+      :o => normalize_expression(options.delete(:opacity)),
+      :q => normalize_expression(options.delete(:quality)),
+      :r => process_radius(options.delete(:radius)),
       :t   => named_transformation,
       :u  => underlay,
-      :w   => width
+      :w   => normalize_expression(width),
+      :x => normalize_expression(options.delete(:x)),
+      :y => normalize_expression(options.delete(:y)),
+      :z => normalize_expression(options.delete(:zoom))
     }
-    {
-      :ac => :audio_codec,
-      :af => :audio_frequency,
-      :ar => :aspect_ratio,
-      :br => :bit_rate,
-      :cs => :color_space,
-      :d  => :default_image,
-      :dl => :delay,
-      :dn => :density,
-      :du => :duration,
-      :eo => :end_offset,
-      :f  => :fetch_format,
-      :g  => :gravity,
-      :ki => :keyframe_interval,
-      :o  => :opacity,
-      :p  => :prefix,
-      :pg => :page,
-      :q  => :quality,
-      :r  => :radius,
-      :so => :start_offset,
-      :sp => :streaming_profile,
-      :vc => :video_codec,
-      :vs => :video_sampling,
-      :x  => :x,
-      :y  => :y,
-      :z  => :zoom
-    }.each do
+    SIMPLE_TRANSFORMATION_PARAMS.each do
       |param, option|
       params[param] = options.delete(option)
     end
@@ -147,10 +262,25 @@ class Cloudinary::Utils
       params[range_value] = norm_range_value params[range_value] if params[range_value].present?
     end
 
+    variables = options.delete(:variables)
+    var_params = []
+    options.each_pair do |key, value|
+      if key =~ /^\$/
+        var_params.push "#{key}_#{normalize_expression(value.to_s)}"
+      end
+    end
+    var_params.sort!
+    unless variables.nil? || variables.empty?
+      for name, value in variables
+        var_params.push "#{name}_#{normalize_expression(value.to_s)}"
+      end
+    end
+    variables = var_params.join(',')
+
     raw_transformation = options.delete(:raw_transformation)
     transformation = params.reject{|_k,v| v.blank?}.map{|k,v| "#{k}_#{v}"}.sort
     transformation = transformation.join(",")
-    transformation = [ifValue, transformation, raw_transformation].reject(&:blank?).join(",")
+    transformation = [ifValue, variables, transformation, raw_transformation].reject(&:blank?).join(",")
 
     transformations = base_transformations << transformation
     if responsive_width
@@ -172,14 +302,20 @@ class Cloudinary::Utils
   # Translates the condition if provided.
   # @return [string] "if_" + ifValue
   # @private
-  def self.process_if(ifValue)
-    if ifValue
-      ifValue = ifValue.gsub(
-        /(#{CONDITIONAL_PARAMETERS.keys.join("|")}|[=<>&|!]+)/,
-        CONDITIONAL_PARAMETERS.merge(CONDITIONAL_OPERATORS))
-        .gsub(/[ _]+/, "_")
+  def self.process_if(if_value)
+    "if_" + normalize_expression(if_value) unless if_value.to_s.empty?
+  end
 
-      ifValue = "if_" + ifValue
+  EXP_REGEXP = Regexp.new(PREDEFINED_VARS.keys.join("|")+'|('+CONDITIONAL_OPERATORS.keys.reverse.map { |k| Regexp.escape(k) }.join('|')+')(?=[ _])')
+  EXP_REPLACEMENT = PREDEFINED_VARS.merge(CONDITIONAL_OPERATORS)
+
+  def self.normalize_expression(expression)
+    if expression.nil?
+      ''
+    elsif expression.is_a?( String) && expression =~ /^!.+!$/ # quoted string
+      expression
+    else
+      expression.to_s.gsub(EXP_REGEXP,EXP_REPLACEMENT).gsub(/[ _]+/, "_")
     end
   end
 
@@ -197,9 +333,13 @@ class Cloudinary::Utils
        text_style    = nil
        components    = []
 
-       unless public_id.blank?
-         public_id = public_id.gsub("/", ":")
-         public_id = "#{public_id}.#{format}" unless format.nil?
+       if public_id.present?
+          if type == "fetch" && public_id.match(%r(^https?:/)i)
+            public_id = Base64.urlsafe_encode64(public_id)
+          else
+            public_id = public_id.gsub("/", ":")
+            public_id = "#{public_id}.#{format}" if format
+          end
        end
 
        if text.blank? && resource_type != "text"
@@ -219,8 +359,16 @@ class Cloudinary::Utils
            unless public_id.blank? ^ text_style.blank?
              raise(CloudinaryException, "Must supply either style parameters or a public_id when providing text parameter in a text overlay/underlay")
            end
-           text = smart_escape smart_escape(text, %r"([,/])")
 
+           result = ""
+           # Don't encode interpolation expressions e.g. $(variable)
+           while(/\$\([a-zA-Z]\w+\)/.match text) do
+             match = Regexp.last_match
+             result += smart_escape smart_escape(match.pre_match, %r"([,/])") # append encoded pre-match
+             result += match.to_s # append match
+             text = match.post_match
+           end
+           text = result + smart_escape( smart_escape(text, %r"([,/])"))
          end
        end
        components.push(resource_type) if resource_type != "image"
@@ -233,6 +381,17 @@ class Cloudinary::Utils
      layer
   end
   private_class_method :process_layer
+
+  # Parse radius options
+  # @return [string] radius transformation string
+  # @private
+  def self.process_radius(radius)
+    if radius.is_a?(Array) && !radius.length.between?(1, 4)
+      raise(CloudinaryException, "Invalid radius parameter")
+    end
+    Array(radius).map { |r| normalize_expression(r) }.join(":")
+  end
+  private_class_method :process_radius
 
   LAYER_KEYWORD_PARAMS =[
     [:font_weight     ,"normal"],
@@ -254,6 +413,10 @@ class Cloudinary::Utils
     keywords.push("letter_spacing_#{letter_spacing}") unless letter_spacing.blank?
     line_spacing = layer[:line_spacing]
     keywords.push("line_spacing_#{line_spacing}") unless line_spacing.blank?
+    font_antialiasing = layer[:font_antialiasing]
+    keywords.push("antialias_#{font_antialiasing}") unless font_antialiasing.blank?
+    font_hinting = layer[:font_hinting]
+    keywords.push("hinting_#{font_hinting}") unless font_hinting.blank?
     if !font_size.blank? || !font_family.blank? || !keywords.empty?
       raise(CloudinaryException, "Must supply font_family for text in overlay/underlay") if font_family.blank?
       raise(CloudinaryException, "Must supply font_size for text in overlay/underlay") if font_size.blank?
@@ -272,6 +435,20 @@ class Cloudinary::Utils
     Digest::SHA1.hexdigest("#{to_sign}#{api_secret}")
   end
 
+  # Returns a JSON array as String.
+  # Yields the array before it is converted to JSON format
+  # @api private
+  # @param [Hash|String|Array<Hash>] data
+  # @return [String|nil] a JSON array string or `nil` if data is `nil`
+  def self.json_array_param(data)
+    return nil if data.nil?
+
+    data = JSON.parse(data) if data.is_a?(String)
+    data = [data] unless data.is_a?(Array)
+    data = yield data if block_given?
+    JSON.generate(data)
+  end
+
   def self.generate_responsive_breakpoints_string(breakpoints)
     return nil if breakpoints.nil?
     breakpoints = build_array(breakpoints)
@@ -280,25 +457,27 @@ class Cloudinary::Utils
       unless breakpoint_settings.nil?
         breakpoint_settings = breakpoint_settings.clone
         transformation =  breakpoint_settings.delete(:transformation) || breakpoint_settings.delete("transformation")
+        format =  breakpoint_settings.delete(:format) || breakpoint_settings.delete("format")
         if transformation
-          breakpoint_settings[:transformation] = Cloudinary::Utils.generate_transformation_string(transformation.clone, true)
-        end 
+          transformation = Cloudinary::Utils.generate_transformation_string(transformation.clone, true)
+        end
+        breakpoint_settings[:transformation] = [transformation, format].compact.join("/")
       end
       breakpoint_settings
-
     end.to_json
   end
 
   # Warning: options are being destructively updated!
   def self.unsigned_download_url(source, options = {})
 
+    patch_fetch_format(options)
     type = options.delete(:type)
 
-    options[:fetch_format] ||= options.delete(:format) if type.to_s == "fetch"
     transformation = self.generate_transformation_string(options)
 
     resource_type = options.delete(:resource_type)
     version = options.delete(:version)
+    force_version = config_option_consume(options, :force_version, true)
     format = options.delete(:format)
     cloud_name = config_option_consume(options, :cloud_name) || raise(CloudinaryException, "Must supply cloud_name in tag or in configuration")
 
@@ -317,6 +496,10 @@ class Cloudinary::Utils
     sign_version = config_option_consume(options, :sign_version) # Deprecated behavior
     url_suffix = options.delete(:url_suffix)
     use_root_path = config_option_consume(options, :use_root_path)
+    auth_token = config_option_consume(options, :auth_token)
+    unless auth_token == false
+      auth_token = Cloudinary::AuthToken.merge_auth_token(Cloudinary.config.auth_token, auth_token)
+    end
 
     original_source = source
     return original_source if source.blank?
@@ -329,43 +512,47 @@ class Cloudinary::Utils
     resource_type ||= "image"
     source = source.to_s
     if !force_remote
+      static_support = Cloudinary.config.static_file_support || Cloudinary.config.static_image_support
+      return original_source if !static_support && type == "asset"
       return original_source if (type.nil? || type == "asset") && source.match(%r(^https?:/)i)
-      if source.start_with?("/")
-        if source.start_with?("/images/")
-          source = source.sub(%r(/images/), '')
-        else
-          return original_source
-        end
-      end
-      @metadata ||= defined?(Cloudinary::Static) ? Cloudinary::Static.metadata : {}
-      if type == "asset" && @metadata["images/#{source}"]
-        return original_source if !Cloudinary.config.static_image_support
-        source = @metadata["images/#{source}"]["public_id"]
-        source += File.extname(original_source) if !format
-      elsif type == "asset"
-        return original_source # requested asset, but no metadata - probably local file. return.
+      return original_source if source.match(%r(^/(?!images/).*)) # starts with / but not /images/
+
+      source = source.sub(%r(^/images/), '') # remove /images/ prefix  - backwards compatibility
+      if type == "asset"
+        source, resource_type = Cloudinary::Static.public_id_and_resource_type_from_path(source)
+        return original_source unless source # asset not found in Static
+        source += File.extname(original_source) unless format
       end
     end
 
     resource_type, type = finalize_resource_type(resource_type, type, url_suffix, use_root_path, shorten)
     source, source_to_sign = finalize_source(source, format, url_suffix)
 
-    version ||= 1 if source_to_sign.include?("/") and !source_to_sign.match(/^v[0-9]+/) and !source_to_sign.match(/^https?:\//)
+    if version.nil? && force_version &&
+         source_to_sign.include?("/") &&
+         !source_to_sign.match(/^v[0-9]+/) &&
+         !source_to_sign.match(/^https?:\//)
+      version = 1
+    end
     version &&= "v#{version}"
 
     transformation = transformation.gsub(%r(([^:])//), '\1/')
-    if sign_url
+    if sign_url && ( !auth_token || auth_token.empty?)
+      raise(CloudinaryException, "Must supply api_secret") if (secret.nil? || secret.empty?)
       to_sign = [transformation, sign_version && version, source_to_sign].reject(&:blank?).join("/")
-      i = 0
-      while to_sign != CGI.unescape(to_sign) && i <10
-        to_sign = CGI.unescape(to_sign)
-        i = i + 1
-      end
+      to_sign = fully_unescape(to_sign)
       signature = 's--' + Base64.urlsafe_encode64(Digest::SHA1.digest(to_sign + secret))[0,8] + '--'
     end
 
     prefix = unsigned_download_url_prefix(source, cloud_name, private_cdn, cdn_subdomain, secure_cdn_subdomain, cname, secure, secure_distribution)
     source = [prefix, resource_type, type, signature, transformation, version, source].reject(&:blank?).join("/")
+    if sign_url && auth_token && !auth_token.empty?
+      auth_token[:url] = URI.parse(source).path
+      token = Cloudinary::AuthToken.generate auth_token
+      source += "?#{token}"
+    end
+
+    source
   end
 
   def self.finalize_source(source, format, url_suffix)
@@ -374,7 +561,7 @@ class Cloudinary::Utils
       source = smart_escape(source)
       source_to_sign = source
     else
-      source = smart_escape(URI.decode(source))
+      source = smart_escape(smart_unescape(source))
       source_to_sign = source
       unless url_suffix.blank?
         raise(CloudinaryException, "url_suffix should not include . or /") if url_suffix.match(%r([\./]))
@@ -398,6 +585,9 @@ class Cloudinary::Utils
       when resource_type.to_s == "image" && type.to_s == "private"
         resource_type = "private_images"
         type = nil
+      when resource_type.to_s == "image" && type.to_s == "authenticated"
+        resource_type = "authenticated_images"
+        type = nil
       when resource_type.to_s == "raw" && type.to_s == "upload"
         resource_type = "files"
         type = nil
@@ -405,7 +595,7 @@ class Cloudinary::Utils
         resource_type = "videos"
         type = nil
       else
-        raise(CloudinaryException, "URL Suffix only supported for image/upload, image/private and raw/upload")
+        raise(CloudinaryException, "URL Suffix only supported for image/upload, image/private, image/authenticated, video/upload and raw/upload")
       end
     end
     if use_root_path
@@ -496,7 +686,7 @@ class Cloudinary::Utils
     return Cloudinary::Utils.cloudinary_api_url("download", options) + "?" + hash_query_params(cloudinary_params)
   end
 
-  # Utility method that uses the deprecated ZIP download API. 
+  # Utility method that uses the deprecated ZIP download API.
   # @deprecated Replaced by {download_zip_url} that uses the more advanced and robust archive generation and download API
   def self.zip_download_url(tag, options = {})
     warn "zip_download_url is deprecated. Please use download_zip_url instead."
@@ -543,14 +733,19 @@ class Cloudinary::Utils
   end
 
   def self.signed_download_url(public_id, options = {})
-    aws_private_key_path = options[:aws_private_key_path] || Cloudinary.config.aws_private_key_path || raise(CloudinaryException, "Must supply aws_private_key_path")
-    aws_key_pair_id = options[:aws_key_pair_id] || Cloudinary.config.aws_key_pair_id || raise(CloudinaryException, "Must supply aws_key_pair_id")
-    authenticated_distribution = options[:authenticated_distribution] || Cloudinary.config.authenticated_distribution || raise(CloudinaryException, "Must supply authenticated_distribution")
-    @signers ||= Hash.new{|h,k| path, id = k; h[k] = AwsCfSigner.new(path, id)}
-    signer = @signers[[aws_private_key_path, aws_key_pair_id]]
-    url = Cloudinary::Utils.unsigned_download_url(public_id, {:type=>:authenticated}.merge(options).merge(:secure=>true, :secure_distribution=>authenticated_distribution, :private_cdn=>true))
-    expires_at = options[:expires_at] || (Time.now+3600)
-    signer.sign(url, :ending => expires_at)
+    aws_private_key_path = options[:aws_private_key_path] || Cloudinary.config.aws_private_key_path
+    if aws_private_key_path
+      aws_key_pair_id = options[:aws_key_pair_id] || Cloudinary.config.aws_key_pair_id || raise(CloudinaryException, "Must supply aws_key_pair_id")
+      authenticated_distribution = options[:authenticated_distribution] || Cloudinary.config.authenticated_distribution || raise(CloudinaryException, "Must supply authenticated_distribution")
+      @signers ||= Hash.new{|h,k| path, id = k; h[k] = AwsCfSigner.new(path, id)}
+      signer = @signers[[aws_private_key_path, aws_key_pair_id]]
+      url = Cloudinary::Utils.unsigned_download_url(public_id, {:type=>:authenticated}.merge(options).merge(:secure=>true, :secure_distribution=>authenticated_distribution, :private_cdn=>true))
+      expires_at = options[:expires_at] || (Time.now+3600)
+      return signer.sign(url, :ending => expires_at)
+    else
+      return Cloudinary::Utils.unsigned_download_url( public_id, options)
+    end
+
   end
 
   def self.cloudinary_url(public_id, options = {})
@@ -570,11 +765,16 @@ class Cloudinary::Utils
     "#{public_id}#{ext}"
   end
 
-  # Based on CGI::unescape. In addition does not escape / :
+  # Based on CGI::escape. In addition does not escape / :
   def self.smart_escape(string, unsafe = /([^a-zA-Z0-9_.\-\/:]+)/)
-    string.gsub(unsafe) do
-      '%' + $1.unpack('H2' * $1.bytesize).join('%').upcase
+    string.gsub(unsafe) do |m|
+      '%' + m.unpack('H2' * m.bytesize).join('%').upcase
     end
+  end
+
+  # Based on CGI::unescape. In addition keeps '+' character as is
+  def self.smart_unescape(string)
+    CGI.unescape(string.sub('+', '%2B'))
   end
 
   def self.random_public_id
@@ -611,9 +811,25 @@ class Cloudinary::Utils
     end
   end
 
+  # encodes a hash into pipe-delimited key-value pairs string
+  # @hash [Hash] key-value hash to be encoded
+  # @return [String] a joined string of all keys and values separated by a pipe character
+  # @private
   def self.encode_hash(hash)
     case hash
       when Hash then hash.map{|k,v| "#{k}=#{v}"}.join("|")
+      when nil then ""
+      else hash
+    end
+  end
+
+  # Same like encode_hash, with additional escaping of | and = characters
+  # @hash [Hash] key-value hash to be encoded
+  # @return [String] a joined string of all keys and values properly escaped and separated by a pipe character
+  # @private
+  def self.encode_context(hash)
+    case hash
+      when Hash then hash.map{|k,v| "#{k}=#{v.to_s.gsub(/([=|])/, '\\\\\1')}"}.join("|")
       when nil then ""
       else hash
     end
@@ -628,7 +844,7 @@ class Cloudinary::Utils
     end
   end
 
-  IMAGE_FORMATS = %w(ai bmp bpg djvu eps eps3 flif gif hdp hpx ico j2k jp2 jpc jpe jpg miff pdf png psd svg tif tiff wdp webp zip )
+  IMAGE_FORMATS = %w(ai bmp bpg djvu eps eps3 flif gif hdp hpx ico j2k jp2 jpc jpe jpeg jpg miff pdf png psd svg tif tiff wdp webp zip )
 
   AUDIO_FORMATS = %w(aac aifc aiff flac m4a mp3 ogg wav)
 
@@ -648,10 +864,8 @@ class Cloudinary::Utils
     case
     when self.supported_format?(format, IMAGE_FORMATS)
       'image'
-    when self.supported_format?(format, VIDEO_FORMATS)
+    when self.supported_format?(format, VIDEO_FORMATS), self.supported_format?(format, AUDIO_FORMATS)
       'video'
-    when self.supported_format?(format, AUDIO_FORMATS)
-      'audio'
     else
       'raw'
     end
@@ -659,7 +873,8 @@ class Cloudinary::Utils
 
   def self.config_option_consume(options, option_name, default_value = nil)
     return options.delete(option_name) if options.include?(option_name)
-    return Cloudinary.config.send(option_name) || default_value
+    option_value = Cloudinary.config.send(option_name)
+    option_value.nil? ? default_value : option_value
   end
 
   def self.as_bool(value)
@@ -668,7 +883,7 @@ class Cloudinary::Utils
     when String then value.downcase == "true" || value == "1"
     when TrueClass then true
     when FalseClass then false
-    when Fixnum then value != 0
+    when Integer then value != 0
     when Symbol then value == :true
     else
       raise "Invalid boolean value #{value} of type #{value.class}"
@@ -745,9 +960,12 @@ class Cloudinary::Utils
       :keep_derived=>Cloudinary::Utils.as_safe_bool(options[:keep_derived]),
       :tags=>options[:tags] && Cloudinary::Utils.build_array(options[:tags]),
       :public_ids=>options[:public_ids] && Cloudinary::Utils.build_array(options[:public_ids]),
+      :fully_qualified_public_ids=>options[:fully_qualified_public_ids] && Cloudinary::Utils.build_array(options[:fully_qualified_public_ids]),
       :prefixes=>options[:prefixes] && Cloudinary::Utils.build_array(options[:prefixes]),
       :expires_at=>options[:expires_at],
-      :transformations => build_eager(options[:transformations])
+      :transformations => build_eager(options[:transformations]),
+      :skip_transformation_name=>Cloudinary::Utils.as_safe_bool(options[:skip_transformation_name]),
+      :allow_missing=>Cloudinary::Utils.as_safe_bool(options[:allow_missing])
     }
   end
 
@@ -769,8 +987,29 @@ class Cloudinary::Utils
     end.join("|")
   end
 
+  def self.generate_auth_token(options)
+    options = Cloudinary::AuthToken.merge_auth_token Cloudinary.config.auth_token, options
+    Cloudinary::AuthToken.generate options
+
+  end
+  
   private
 
+
+  # Repeatedly unescapes the source until no more unescaping is possible or 10 cycles elapsed
+  # @param [String] source - a (possibly) escaped string
+  # @return [String] the fully unescaped string
+  # @private
+  def self.fully_unescape(source)
+    i = 0
+    while source != CGI.unescape(source.gsub('+', '%2B')) && i <10
+      source = CGI.unescape(source.gsub('+', '%2B')) # don't let unescape replace '+' with space
+      i = i + 1
+    end
+    source
+  end
+  private_class_method :fully_unescape
+  
   def self.hash_query_params(hash)
     if hash.respond_to?("to_query")
       hash.to_query
@@ -863,4 +1102,34 @@ class Cloudinary::Utils
   end
   private_class_method :process_video_params
 
+  def self.process_custom_pre_function(param)
+    value = process_custom_function(param)
+    value ? "pre:#{value}" : nil
+  end
+
+  def self.process_custom_function(param)
+    return param unless param.is_a? Hash
+
+    function_type = param[:function_type]
+    source = param[:source]
+
+    source = Base64.urlsafe_encode64(source) if function_type == "remote"
+    "#{function_type}:#{source}"
+  end
+
+  #
+  # Handle the format parameter for fetch urls
+  # @private
+  # @param options url and transformation options. This argument may be changed by the function!
+  #
+  def self.patch_fetch_format(options={})
+    if options[:type] === :fetch
+      format_arg = options.delete(:format)
+      options[:fetch_format] ||= format_arg
+    end
+  end
+
+  def self.is_remote?(url)
+    REMOTE_URL_REGEX === url
+  end
 end

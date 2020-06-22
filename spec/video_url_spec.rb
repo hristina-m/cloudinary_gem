@@ -6,9 +6,11 @@ require 'cloudinary/helper'
 require 'action_view/test_case'
 
 describe Cloudinary::Utils do
+
   before(:each) do
+    Cloudinary.reset_config
     Cloudinary.config do |config|
-      config.cloud_name          = "test123"
+      config.cloud_name          = DUMMY_CLOUD
       config.secure_distribution = nil
       config.private_cdn         = false
       config.secure              = false
@@ -18,7 +20,7 @@ describe Cloudinary::Utils do
       config.api_secret          = "b"
     end
   end
-  let(:root_path) { "http://res.cloudinary.com/test123" }
+  let(:root_path) { "http://res.cloudinary.com/#{DUMMY_CLOUD}" }
   let(:upload_path) { "#{root_path}/video/upload" }
 
   describe "cloudinary_url" do
@@ -104,6 +106,11 @@ describe Cloudinary::Utils do
             .to produce_url("#{upload_path}/#{short}_35p/video_id")
                   .and empty_options
         end
+        it 'should support the "auto" keyword' do
+          expect(["video_id", { :resource_type => 'video', long => 'auto' }])
+            .to produce_url("#{upload_path}/#{short}_auto/video_id")
+                  .and empty_options
+        end
       end
     end
 
@@ -157,6 +164,20 @@ describe Cloudinary::Utils do
           .to produce_url("#{upload_path}/g_center,p_a,q_0.4,r_3,x_1,y_2/test")
                 .and empty_options
 
+      end
+    end
+    it "should support the fps parameter" do
+      [
+        ['24-29.97', 'fps_24-29.97'],
+        [24, 'fps_24'],
+        [24.973, 'fps_24.973'],
+        ['24', 'fps_24'],
+        ['-24', 'fps_-24'],
+        ['$v', 'fps_$v'],
+        [[24, 29.97], 'fps_24-29.97'],
+        [['24', '$v'], 'fps_24-$v']
+      ].each do |value, param|
+        expect(Cloudinary::Utils.generate_transformation_string(:fps => value)).to eq(param)
       end
     end
   end

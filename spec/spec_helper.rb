@@ -1,15 +1,47 @@
+SUFFIX = ENV['TRAVIS_JOB_ID'] || rand(999999999).to_s
+
 require 'rspec'
 require 'rexml/parsers/ultralightparser'
+require 'nokogiri'
 require 'rspec/version'
 require 'rest_client'
+require 'active_storage/test_helper' if RUBY_VERSION >= '2.2.2'
+require 'cloudinary'
 
+Cloudinary.config.enhance_image_tag = true
+
+DUMMY_CLOUD = "test123"
 TEST_IMAGE_URL = "http://cloudinary.com/images/old_logo.png"
 TEST_IMG = "spec/logo.png"
+TEST_VIDEO = "spec/movie.mp4"
+TEST_RAW = "spec/docx.docx"
 TEST_IMG_W = 241
 TEST_IMG_H = 51
-
 TEST_TAG = 'cloudinary_gem_test'
-TIMESTAMP_TAG = "#{TEST_TAG}_#{rand(999999999)}_#{RUBY_VERSION}_#{ defined? Rails::version ? Rails::version : 'no_rails'}"
+TIMESTAMP_TAG = "#{TEST_TAG}_#{SUFFIX}_#{RUBY_VERSION}_#{ defined? Rails::version ? Rails::version : 'no_rails'}"
+UNIQUE_TEST_FOLDER = "#{TEST_TAG}_#{SUFFIX}_folder"
+NEXT_CURSOR = "db27cfb02b3f69cb39049969c23ca430c6d33d5a3a7c3ad1d870c54e1a54ee0faa5acdd9f6d288666986001711759d10"
+GENERIC_FOLDER_NAME = "some_folder"
+
+# Auth token
+KEY     = "00112233FF99"
+ALT_KEY = "CCBB2233FF00"
+CACHE_KEY = "some_key" + SUFFIX
+
+module ResponsiveTest
+  TRANSFORMATION = {:angle => 45, :crop => "scale"}
+  FORMAT = "png"
+  IMAGE_BP_VALUES = [206, 50]
+  BREAKPOINTS = [100, 200, 300, 399]
+
+end
+Dir[File.join(File.dirname(__FILE__), '/support/**/*.rb')].each {|f| require f}
+
+module RSpec
+  def self.project_root
+    File.join(File.dirname(__FILE__), '..')
+  end
+end
 
 # See http://rubydoc.info/gems/rspec-core/RSpec/Core/Configuration
 RSpec.configure do |config|
@@ -24,6 +56,12 @@ RSpec.shared_context "cleanup" do |tag|
   tag ||= TEST_TAG
   after :all do
     Cloudinary::Api.delete_resources_by_tag(tag) unless Cloudinary.config.keep_test_products
+  end
+end
+
+module Cloudinary
+  def self.reset_config
+    @@config = nil
   end
 
 end
@@ -41,39 +79,45 @@ end
 
 # Represents an HTML tag
 class TestTag
-  attr_accessor :name, :attributes, :children, :text, :html_string
+  attr_accessor :element
   # Creates a new +TestTag+ from a given +element+ string
   def initialize(element)
     @html_string = element
-    element = valid_tag(element) unless element.is_a? Array
-    case element[0]
-    when :start_element
-      @name = element[2]
-      @attributes = element[3]
-      @children = (Array(element[4..-1]) || []).map {|c | TestTag.new c}
-    when :text
-      @text = element[1]
-      @name = "text"
-      @attributes = []
-      @children = []
-    end
+    @element = valid_tag(element) unless element.is_a? Array
 
   end
 
+  def name
+    @element.name
+  end
+
+  def attributes
+    @element.attributes
+  end
+
+  def children
+    @element.children
+  end
   # Parses a given +tag+ in string format
   def valid_tag(tag)
-    parser = REXML::Parsers::UltraLightParser.new( tag)
-    parser.parse[0]
+    parser = Nokogiri::HTML::Document.parse( tag)
+    # Parsed code will be strctured as either html>body>tag or html>head>tag
+    parser.children[1].children[0].children[0]
   end
 
   # Returns attribute named +symbol_or_string+
   def [](symbol_or_string)
-    attributes[symbol_or_string.to_s]
+    begin
+      attributes[symbol_or_string.to_s].value
+    rescue
+      nil
+    end
   end
 
   def method_missing(symbol, *args)
     if (m = /children_by_(\w+)/.match(symbol.to_s)) and !args.empty?
-      @children.select{ |c| c[m[1]] == args[0]}
+      return unless children
+      children.select{ |c| c[m[1]] == args[0]}
     else
       super
     end
@@ -131,7 +175,13 @@ end
 RSpec::Matchers.define :be_served_by_cloudinary do
   match do |url|
     if url.is_a? Array
-      url = Cloudinary::Utils.cloudinary_url( url[0], url[1])
+      url, options = url
+      url = Cloudinary::Utils.cloudinary_url(url, options.clone)
+      if Cloudinary.config.upload_prefix
+        res_prefix_uri = URI.parse(Cloudinary.config.upload_prefix)
+        res_prefix_uri.path = '/res'
+        url.gsub!(/https?:\/\/res.cloudinary.com/, res_prefix_uri.to_s)
+      end
     end
     code = 0
     @url = url

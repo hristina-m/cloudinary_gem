@@ -1,9 +1,11 @@
 # Copyright Cloudinary
 require 'rest_client'
 require 'json'
+require 'cloudinary/cache'
 
 class Cloudinary::Uploader
 
+  REMOTE_URL_REGEX = Cloudinary::Utils::REMOTE_URL_REGEX
   # @deprecated use {Cloudinary::Utils.build_eager} instead
   def self.build_eager(eager)
     Cloudinary::Utils.build_eager(eager)
@@ -16,15 +18,18 @@ class Cloudinary::Uploader
     options.keys.each { |key| options[key.to_sym] = options.delete(key) if key.is_a?(String) }
 
     params = {
+      :access_control            => Cloudinary::Utils.json_array_param(options[:access_control]),
       :access_mode               => options[:access_mode],
       :allowed_formats           => Cloudinary::Utils.build_array(options[:allowed_formats]).join(","),
+      :async                     => Cloudinary::Utils.as_safe_bool(options[:async]),
       :auto_tagging              => options[:auto_tagging] && options[:auto_tagging].to_f,
       :background_removal        => options[:background_removal],
       :backup                    => Cloudinary::Utils.as_safe_bool(options[:backup]),
       :callback                  => options[:callback],
       :categorization            => options[:categorization],
+      :cinemagraph_analysis      => Cloudinary::Utils.as_safe_bool(options[:cinemagraph_analysis]),
       :colors                    => Cloudinary::Utils.as_safe_bool(options[:colors]),
-      :context                   => Cloudinary::Utils.encode_hash(options[:context]),
+      :context                   => Cloudinary::Utils.encode_context(options[:context]),
       :custom_coordinates        => Cloudinary::Utils.encode_double_array(options[:custom_coordinates]),
       :detection                 => options[:detection],
       :discard_original_filename => Cloudinary::Utils.as_safe_bool(options[:discard_original_filename]),
@@ -46,6 +51,8 @@ class Cloudinary::Uploader
       :phash                     => Cloudinary::Utils.as_safe_bool(options[:phash]),
       :proxy                     => options[:proxy],
       :public_id                 => options[:public_id],
+      :quality_analysis          => Cloudinary::Utils.as_safe_bool(options[:quality_analysis]),
+      :quality_override          => options[:quality_override],
       :raw_convert               => options[:raw_convert],
       :responsive_breakpoints    => Cloudinary::Utils.generate_responsive_breakpoints_string(options[:responsive_breakpoints]),
       :return_delete_token       => Cloudinary::Utils.as_safe_bool(options[:return_delete_token]),
@@ -57,6 +64,7 @@ class Cloudinary::Uploader
       :unique_filename           => Cloudinary::Utils.as_safe_bool(options[:unique_filename]),
       :upload_preset             => options[:upload_preset],
       :use_filename              => Cloudinary::Utils.as_safe_bool(options[:use_filename]),
+      :accessibility_analysis    => Cloudinary::Utils.as_safe_bool(options[:accessibility_analysis])
     }
     params
   end
@@ -70,7 +78,7 @@ class Cloudinary::Uploader
       params = build_upload_params(options)
       if file.is_a?(Pathname)
         params[:file] = File.open(file, "rb")
-      elsif file.respond_to?(:read) || file =~ /^ftp:|^https?:|^s3:|^data:[^;]*;base64,([a-zA-Z0-9\/+\n=]+)$/
+      elsif file.respond_to?(:read) || Cloudinary::Utils.is_remote?(file)
         params[:file] = file
       else
         params[:file] = File.open(file, "rb")
@@ -88,12 +96,15 @@ class Cloudinary::Uploader
       public_id = public_id_or_options
       options   = old_options
     end
-    if file.is_a?(Pathname) || !file.respond_to?(:read)
+    if Cloudinary::Utils.is_remote?(file)
+      return upload(file, options.merge(:public_id => public_id))
+    elsif file.is_a?(Pathname) || !file.respond_to?(:read)
       filename = file
       file     = File.open(file, "rb")
     else
       filename = "cloudinaryfile"
     end
+    unique_upload_id = Cloudinary::Utils.random_public_id
     upload     = nil
     index      = 0
     chunk_size = options[:chunk_size] || 20_000_000
@@ -101,8 +112,7 @@ class Cloudinary::Uploader
       buffer      = file.read(chunk_size)
       current_loc = index*chunk_size
       range       = "bytes #{current_loc}-#{current_loc+buffer.size - 1}/#{file.size}"
-      upload      = upload_large_part(Cloudinary::Blob.new(buffer, :original_filename => filename), options.merge(:public_id => public_id, :content_range => range))
-      public_id   = upload["public_id"]
+      upload      = upload_large_part(Cloudinary::Blob.new(buffer, :original_filename => filename), options.merge(:public_id => public_id, :unique_upload_id => unique_upload_id, :content_range => range))
       index       += 1
     end
     upload
@@ -142,6 +152,7 @@ class Cloudinary::Uploader
         :overwrite      => Cloudinary::Utils.as_safe_bool(options[:overwrite]),
         :from_public_id => from_public_id,
         :to_public_id   => to_public_id,
+        :to_type        => options[:to_type],
         :invalidate     => Cloudinary::Utils.as_safe_bool(options[:invalidate])
       }
     end
@@ -238,7 +249,7 @@ class Cloudinary::Uploader
     end
   end
 
-  # options may include 'exclusive' (boolean) which causes clearing this tag from all other resources 
+  # options may include 'exclusive' (boolean) which causes clearing this tag from all other resources
   def self.add_tag(tag, public_ids = [], options = {})
     exclusive = options.delete(:exclusive)
     command   = exclusive ? "set_exclusive" : "add"
@@ -251,6 +262,10 @@ class Cloudinary::Uploader
 
   def self.replace_tag(tag, public_ids = [], options = {})
     return self.call_tags_api(tag, "replace", public_ids, options)
+  end
+
+  def self.remove_all_tags(public_ids = [], options = {})
+    return self.call_tags_api(nil, "remove_all", public_ids, options)
   end
 
   private
@@ -267,9 +282,32 @@ class Cloudinary::Uploader
     end
   end
 
+  def self.add_context(context, public_ids = [], options = {})
+    return self.call_context_api(context, "add", public_ids, options)
+  end
+
+  def self.remove_all_context(public_ids = [], options = {})
+    return self.call_context_api(nil, "remove_all", public_ids, options)
+  end
+
+  private
+
+  def self.call_context_api(context, command, public_ids = [], options = {})
+    return call_api("context", options) do
+      {
+        :timestamp  => (options[:timestamp] || Time.now.to_i),
+        :context    => Cloudinary::Utils.encode_context(context),
+        :public_ids => Cloudinary::Utils.build_array(public_ids),
+        :command    => command,
+        :type       => options[:type]
+      }
+    end
+  end
+
   def self.call_api(action, options)
     options      = options.clone
     return_error = options.delete(:return_error)
+    use_cache = options[:use_cache] || Cloudinary.config.use_cache
 
     params, non_signable = yield
     non_signable         ||= []
@@ -280,13 +318,14 @@ class Cloudinary::Uploader
       params[:signature] = Cloudinary::Utils.api_sign_request(params.reject { |k, v| non_signable.include?(k) }, api_secret)
       params[:api_key]   = api_key
     end
-    timeout = options[:timeout] || Cloudinary.config.timeout || 60
+    timeout = options.fetch(:timeout) { Cloudinary.config.to_h.fetch(:timeout, 60) }
 
     result = nil
 
     api_url                  = Cloudinary::Utils.cloudinary_api_url(action, options)
     headers                  = { "User-Agent" => Cloudinary::USER_AGENT }
     headers['Content-Range'] = options[:content_range] if options[:content_range]
+    headers['X-Unique-Upload-Id'] = options[:unique_upload_id] if options[:unique_upload_id]
     headers.merge!(options[:extra_headers]) if options[:extra_headers]
     RestClient::Request.execute(:method => :post, :url => api_url, :payload => params.reject { |k, v| v.nil? || v=="" }, :timeout => timeout, :headers => headers) do
     |response, request, tmpresult|
@@ -305,11 +344,26 @@ class Cloudinary::Uploader
         end
       end
     end
-
+    if use_cache && !result.nil?
+      cache_results(result)
+    end
     result
   end
 
   def self.build_custom_headers(headers)
     Array(headers).map { |*a| a.join(": ") }.join("\n")
   end
+
+  def self.cache_results(result)
+      if result["responsive_breakpoints"]
+        result["responsive_breakpoints"].each do |bp|
+          Cloudinary::Cache.set(
+            result["public_id"],
+            {type: result["type"], resource_type: result["resource_type"], raw_transformation: bp["transformation"]},
+            bp["breakpoints"].map{|o| o['width']}
+          )
+          end
+      end
+
+      end
 end

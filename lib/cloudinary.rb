@@ -1,5 +1,10 @@
 # Copyright Cloudinary
-require "ostruct"
+if RUBY_VERSION > "2"
+  require "ostruct"
+else
+  require "cloudinary/ostruct2"
+end
+
 require "pathname"
 require "yaml"
 require "uri"
@@ -17,14 +22,15 @@ module Cloudinary
   autoload :PreloadedFile, "cloudinary/preloaded_file"
   autoload :Static, "cloudinary/static"
   autoload :CarrierWave, "cloudinary/carrier_wave"
+  autoload :Search, "cloudinary/search"
 
-  CF_SHARED_CDN = "d3jpl91pxevbkh.cloudfront.net"
-  AKAMAI_SHARED_CDN = "res.cloudinary.com"
+  CF_SHARED_CDN         = "d3jpl91pxevbkh.cloudfront.net"
+  AKAMAI_SHARED_CDN     = "res.cloudinary.com"
   OLD_AKAMAI_SHARED_CDN = "cloudinary-a.akamaihd.net"
-  SHARED_CDN = AKAMAI_SHARED_CDN
+  SHARED_CDN            = AKAMAI_SHARED_CDN
 
-  USER_AGENT = "CloudinaryRuby/" + VERSION
-  @@user_platform = ""
+  USER_AGENT      = "CloudinaryRuby/#{VERSION} (Ruby #{RUBY_VERSION}-p#{RUBY_PATCHLEVEL})"
+  @@user_platform = defined?(Rails.version) ? "Rails/#{Rails.version}" : ""
 
   # Add platform information to the USER_AGENT header
   # This is intended for platform information and not individual applications!
@@ -38,7 +44,7 @@ module Cloudinary
 
   def self.USER_AGENT
     if @@user_platform.empty?
-      "#{USER_AGENT}"
+      USER_AGENT
     else
       "#{@@user_platform} #{USER_AGENT}"
     end
@@ -53,7 +59,6 @@ module Cloudinary
     "tif" => "tiff",
     "ps" => "eps",
     "ept" => "eps",
-    "eps" => "eps",
     "bmp" => "bmp"
   }
 
@@ -61,21 +66,9 @@ module Cloudinary
 
   def self.config(new_config=nil)
     first_time = @@config.nil?
-    @@config ||= OpenStruct.new((YAML.load(ERB.new(IO.read(config_dir.join("cloudinary.yml"))).result)[config_env] rescue {}))
+    @@config   ||= OpenStruct.new((YAML.load(ERB.new(IO.read(config_dir.join("cloudinary.yml"))).result)[config_env] rescue {}))
 
-    # Heroku support
-    if first_time && ENV["CLOUDINARY_CLOUD_NAME"]
-      set_config(
-        "cloud_name" => ENV["CLOUDINARY_CLOUD_NAME"],
-        "api_key" => ENV["CLOUDINARY_API_KEY"],
-        "api_secret" => ENV["CLOUDINARY_API_SECRET"],
-        "secure_distribution" => ENV["CLOUDINARY_SECURE_DISTRIBUTION"],
-        "private_cdn" => ENV["CLOUDINARY_PRIVATE_CDN"].to_s == 'true',
-        "secure" => ENV["CLOUDINARY_SECURE"].to_s == 'true'
-      )
-    elsif first_time && ENV["CLOUDINARY_URL"]
-      config_from_url(ENV["CLOUDINARY_URL"])
-    end
+    config_from_env if first_time
 
     set_config(new_config) if new_config
     yield(@@config) if block_given?
@@ -85,19 +78,48 @@ module Cloudinary
 
   def self.config_from_url(url)
     @@config ||= OpenStruct.new
+    return unless url && !url.empty?
     uri = URI.parse(url)
+    if !uri.scheme || "cloudinary" != uri.scheme.downcase
+      raise(CloudinaryException,
+        "Invalid CLOUDINARY_URL scheme. Expecting to start with 'cloudinary://'")
+    end
     set_config(
-      "cloud_name" => uri.host,
-      "api_key" => uri.user,
-      "api_secret" => uri.password,
-      "private_cdn" => !uri.path.blank?,
+      "cloud_name"          => uri.host,
+      "api_key"             => uri.user,
+      "api_secret"          => uri.password,
+      "private_cdn"         => !uri.path.blank?,
       "secure_distribution" => uri.path[1..-1]
     )
     uri.query.to_s.split("&").each do
-      |param|
+    |param|
       key, value = param.split("=")
-      set_config(key=>URI.decode(value))
+      if isNestedKey? key
+        putNestedKey key, value
+      else
+        set_config(key => Utils.smart_unescape(value))
+      end
     end
+  end
+
+  def self.putNestedKey(key, value)
+    chain   = key.split(/[\[\]]+/).reject { |i| i.empty? }
+    outer   = @@config
+    lastKey = chain.pop()
+    chain.each do |innerKey|
+      inner = outer[innerKey]
+      if inner.nil?
+        inner           = OpenStruct.new
+        outer[innerKey] = inner
+      end
+      outer = inner
+    end
+    outer[lastKey] = value
+  end
+
+
+  def self.isNestedKey?(key)
+    /\w+\[\w+\]/ =~ key
   end
 
   def self.app_root
@@ -110,6 +132,22 @@ module Cloudinary
   end
 
   private
+
+  def self.config_from_env
+    # Heroku support
+    if ENV["CLOUDINARY_CLOUD_NAME"]
+      config_keys = ENV.keys.select! { |key| key.start_with? "CLOUDINARY_" }
+      config_keys -= ["CLOUDINARY_URL"] # ignore it when explicit options are passed
+      config_keys.each do |full_key|
+        conf_key = full_key["CLOUDINARY_".length..-1].downcase # convert "CLOUDINARY_CONFIG_NAME" to "config_name"
+        conf_val = ENV[full_key]
+        conf_val = conf_val == 'true' if %w[true false].include?(conf_val) # cast relevant boolean values
+        set_config(conf_key => conf_val)
+      end
+    elsif ENV["CLOUDINARY_URL"]
+      config_from_url(ENV["CLOUDINARY_URL"])
+    end
+  end
 
   def self.config_env
     return ENV["CLOUDINARY_ENV"] if ENV["CLOUDINARY_ENV"]
@@ -126,9 +164,9 @@ module Cloudinary
     new_config.each{|k,v| @@config.send(:"#{k}=", v) if !v.nil?}
   end
 end
+  # Prevent require loop if included after Rails is already initialized.
+  require "cloudinary/helper" if defined?(::ActionView::Base)
+  require "cloudinary/cloudinary_controller" if defined?(::ActionController::Base)
+  require "cloudinary/railtie" if defined?(Rails) && defined?(Rails::Railtie)
+  require "cloudinary/engine" if defined?(Rails) && defined?(Rails::Engine)
 
-# Prevent require loop if included after Rails is already initialized.
-require "cloudinary/helper" if defined?(::ActionView::Base)
-require "cloudinary/controller" if defined?(::ActionController::Base)
-require "cloudinary/railtie" if defined?(Rails) && defined?(Rails::Railtie)
-require "cloudinary/engine" if defined?(Rails) && defined?(Rails::Engine)

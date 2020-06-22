@@ -1,7 +1,11 @@
 require 'digest/md5'
 require 'cloudinary/video_helper'
+require 'cloudinary/responsive'
 
 module CloudinaryHelper
+  include ActionView::Helpers::CaptureHelper
+  include Responsive
+
   CL_BLANK = "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7"
 
   # Stand-in for Rails image_tag helper that accepts various options for transformations.
@@ -37,13 +41,45 @@ module CloudinaryHelper
 
   end
 
+
+  def cl_picture_tag(source, options = {}, sources =[])
+
+    options = options.clone
+    content_tag 'picture' do
+      sources.map do |source_def|
+        source_options = options.clone
+        source_options = Cloudinary::Utils.chain_transformation(source_options, source_def[:transformation])
+        source_options[:media] = source_def
+        cl_source_tag(source, source_options)
+      end.push(cl_image_tag(source, options))
+          .join('')
+          .html_safe
+    end
+  end
+
+  def cl_source_tag(source, options)
+    srcset_param = options.fetch(:srcset, {}).merge(Cloudinary.config.srcset || {})
+    attributes = options.fetch(:attributes, {}).clone
+    responsive_attributes = generate_image_responsive_attributes(source, attributes, srcset_param, options)
+    attributes = attributes.merge(responsive_attributes)
+    unless attributes.has_key? :srcset
+      attributes[:srcset] = Cloudinary::Utils.cloudinary_url(source, options)
+    end
+    media_attr = generate_media_attribute(options[:media])
+    attributes[:media] = media_attr unless media_attr.empty?
+    tag "source", attributes, true
+  end
+
+
   def cloudinary_tag(source, options = {})
     tag_options = options.clone
     tag_options[:width] = tag_options.delete(:html_width) if tag_options.include?(:html_width)
     tag_options[:height] = tag_options.delete(:html_height) if tag_options.include?(:html_height)
     tag_options[:size] = tag_options.delete(:html_size) if tag_options.include?(:html_size)
     tag_options[:border] = tag_options.delete(:html_border) if tag_options.include?(:html_border)
-    source = cloudinary_url_internal(source, tag_options)
+    srcset_param = Cloudinary::Utils.config_option_consume(tag_options, :srcset, {})
+    src = cloudinary_url_internal(source, tag_options)
+    attributes = tag_options.delete(:attributes) || {}
 
     responsive_placeholder = Cloudinary::Utils.config_option_consume(tag_options, :responsive_placeholder)
     client_hints = Cloudinary::Utils.config_option_consume(tag_options, :client_hints)
@@ -51,15 +87,21 @@ module CloudinaryHelper
     hidpi = tag_options.delete(:hidpi)
     responsive = tag_options.delete(:responsive)
     if !client_hints && (hidpi || responsive)
-      tag_options["data-src"] = source
-      source = nil
+      tag_options["data-src"] = src
+      src = nil
       extra_class = responsive ? "cld-responsive" : "cld-hidpi"
       tag_options[:class] = [tag_options[:class], extra_class].compact.join(" ")
       responsive_placeholder = CL_BLANK if responsive_placeholder == "blank"
       tag_options[:src] = responsive_placeholder
     end
+    responsive_attrs = generate_image_responsive_attributes(source, attributes, srcset_param, options)
+    unless  responsive_attrs.empty?
+      tag_options.delete(:width)
+      tag_options.delete(:height)
+      tag_options.merge! responsive_attrs
+    end
     if block_given?
-      yield(source,tag_options)
+      yield(src,tag_options)
     else
       tag('div', tag_options)
     end
@@ -75,6 +117,7 @@ module CloudinaryHelper
     url = cloudinary_url_internal(source, options)
     image_path_without_cloudinary(url)
   end
+  alias_method :cl_path, :cl_image_path
 
   def image_tag_with_cloudinary(*args)
     source, options = args
@@ -200,6 +243,7 @@ module CloudinaryHelper
   def cl_unsigned_image_upload(object_name, method, upload_preset, options={})
     cl_unsigned_image_upload_tag("#{object_name}[#{method}]", upload_preset, options)
   end
+  alias_method :cl_unsigned_upload, :cl_unsigned_image_upload
 
   def cl_upload_url(options={})
     Cloudinary::Utils.cloudinary_api_url("upload", {:resource_type=>:auto}.merge(options))
@@ -236,12 +280,13 @@ module CloudinaryHelper
   def cl_unsigned_image_upload_tag(field, upload_preset, options={})
     cl_image_upload_tag(field, options.merge(:unsigned => true, :upload_preset => upload_preset))
   end
+  alias_method :cl_unsigned_upload_tag, :cl_unsigned_image_upload_tag
 
   def cl_private_download_url(public_id, format, options = {})
     Cloudinary::Utils.private_download_url(public_id, format, options)
   end
 
-  # Helper method that uses the deprecated ZIP download API. 
+  # Helper method that uses the deprecated ZIP download API.
   # Replaced by cl_download_zip_url that uses the more advanced and robust archive generation and download API
   # @deprecated
   def cl_zip_download_url(tag, options = {})
@@ -251,7 +296,7 @@ module CloudinaryHelper
   # @see {Cloudinary::Utils.download_archive_url}
   def cl_download_archive_url(options = {})
     Cloudinary::Utils.download_archive_url(options)
-  end  
+  end
 
   # @see {Cloudinary::Utils.download_zip_url}
   def cl_download_zip_url(options = {})
@@ -268,17 +313,17 @@ module CloudinaryHelper
       if !method_defined?(:image_tag)
         include ActionView::Helpers::AssetTagHelper
       end
-      if defined?(::Rails::VERSION::MAJOR) && ::Rails::VERSION::MAJOR > 2 && Cloudinary.config.enhance_image_tag
-        alias_method_chain :image_tag, :cloudinary unless public_method_defined? :image_tag_without_cloudinary
-        alias_method_chain :image_path, :cloudinary unless public_method_defined? :image_path_without_cloudinary
-      else
-        alias_method :image_tag_without_cloudinary, :image_tag unless public_method_defined? :image_tag_without_cloudinary
-        alias_method :image_path_without_cloudinary, :image_path unless public_method_defined? :image_path_without_cloudinary
+      alias_method :image_tag_without_cloudinary, :image_tag unless public_method_defined? :image_tag_without_cloudinary
+      alias_method :image_path_without_cloudinary, :image_path unless public_method_defined? :image_path_without_cloudinary
+      if Cloudinary.config.enhance_image_tag
+        alias_method :image_tag, :image_tag_with_cloudinary
+        alias_method :image_path, :image_path_with_cloudinary
       end
     end
   end
 
   private
+
   def cloudinary_url_internal(source, options = {})
     options[:ssl_detected] = request.ssl? if defined?(request) && request && request.respond_to?(:ssl?)
     if defined?(CarrierWave::Uploader::Base) && source.is_a?(CarrierWave::Uploader::Base)
@@ -318,6 +363,7 @@ module Cloudinary::FormBuilder
   def cl_unsigned_image_upload(method, upload_preset, options={})
     @template.cl_unsigned_image_upload(@object_name, method, upload_preset, objectify_options(options))
   end
+  alias_method :cl_unsigned_upload, :cl_unsigned_image_upload
 end
 
 if defined? ActionView::Helpers::AssetUrlHelper
@@ -373,3 +419,30 @@ rescue LoadError
   # no sass support. Ignore.
 end
 
+begin
+  require 'sassc'
+  require 'sassc/script/functions'
+  module SassC::Script::Functions
+    # Helper method for generating cloudinary_url in scss files.
+    #
+    # As opposed to sass(deprecated), optional named arguments are not supported, use hash map instead.
+    #
+    # Example:
+    #   Sass: cloudinary-url("sample", $quality: "auto", $fetch_format: "auto");
+    #  becomes
+    #   SassC: cloudinary-url("sample", ("quality": "auto", "fetch_format": "auto"));
+    #
+    # @param [::SassC::Script::Value::String] public_id The public ID of the resource
+    # @param [::SassC::Script::Value::Map] sass_options Additional options
+    #
+    # @return [::SassC::Script::Value::String]
+    def cloudinary_url(public_id, sass_options = {})
+      options = {}
+      sass_options.to_h.each { |k, v| options[k.value] = v.value }
+      url = Cloudinary::Utils.cloudinary_url(public_id.value, {:type => :asset}.merge(options))
+      ::SassC::Script::Value::String.new("url(#{url})")
+    end
+  end
+rescue LoadError
+  # no sassc support. Ignore.
+end

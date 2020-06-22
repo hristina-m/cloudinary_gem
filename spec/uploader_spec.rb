@@ -22,6 +22,13 @@ describe Cloudinary::Uploader do
     expect(result["width"]).to eq(TEST_IMG_W)
   end
 
+  it "should successfully upload a file from IO" do
+    File.open(TEST_IMG, "rb") do |test_img_file|
+      result = Cloudinary::Uploader.upload(test_img_file, :tags => [TEST_TAG, TIMESTAMP_TAG])
+      expect(result["width"]).to eq(TEST_IMG_W)
+    end
+  end
+
   it "should successfully upload file by url" do
     result = Cloudinary::Uploader.upload("http://cloudinary.com/images/old_logo.png", :tags => [TEST_TAG, TIMESTAMP_TAG])
     expect(result["width"]).to eq(TEST_IMG_W)
@@ -30,10 +37,55 @@ describe Cloudinary::Uploader do
     expect(result["signature"]).to eq(expected_signature)
   end
 
+  it "should successfully upload file asynchronously" do
+    result = Cloudinary::Uploader.upload(Pathname.new(TEST_IMG), :async => true)
+    expect(result["status"]).to eq("pending")
+  end
+
+  it "should support the quality_analysis parameter" do
+    result = Cloudinary::Uploader.upload(Pathname.new(TEST_IMG), :quality_analysis => true, :tags => [TEST_TAG, TIMESTAMP_TAG])
+    expect(result).to have_key("quality_analysis")
+    expect(result["quality_analysis"]).to have_key("focus")
+  end
+
+  it "should support the accessibility_analysis of an uploaded image" do
+    result = Cloudinary::Uploader.upload(Pathname.new(TEST_IMG), :accessibility_analysis => true, :tags => [TEST_TAG, TIMESTAMP_TAG])
+    expect(result).to have_key("accessibility_analysis")
+    result = Cloudinary::Uploader.explicit(result['public_id'], :type => "upload", :accessibility_analysis => true)
+    expect(result).to have_key("accessibility_analysis")
+  end
+
+  it "should support the quality_override parameter" do
+    ['auto:advanced', 'auto:best', '80:420', 'none'].each do |q|
+      expected = {[:payload, :quality_override] => q}
+      expect(RestClient::Request).to receive(:execute).with(deep_hash_value(expected))
+      Cloudinary::Uploader.upload Pathname.new(TEST_IMG), :quality_override => q
+    end
+  end
+
+  it "should support the cinemagraph_analysis parameter for upload" do
+    expected = {
+        [:payload, :cinemagraph_analysis] => 1,
+        [:method] => :post
+    }
+    expect(RestClient::Request).to receive(:execute).with(deep_hash_value(expected))
+    Cloudinary::Uploader.upload(Pathname.new(TEST_IMG), :cinemagraph_analysis => true, :tags => [TEST_TAG, TIMESTAMP_TAG])
+  end
+
+  it "should support the cinemagraph_analysis parameter for explicit" do
+    expected = {
+        [:payload, :cinemagraph_analysis] => 1,
+        [:method] => :post
+    }
+    expect(RestClient::Request).to receive(:execute).with(deep_hash_value(expected))
+    Cloudinary::Uploader.explicit('sample', :type => "upload", :cinemagraph_analysis => true, :tags => [TEST_TAG, TIMESTAMP_TAG])
+  end
+
   describe '.rename' do
     before(:all) do
       @result        = Cloudinary::Uploader.upload(TEST_IMG, :tags => [TEST_TAG, TIMESTAMP_TAG])
       @resource_1_id = @result["public_id"]
+      @resource_1_type = @result["type"]
       result         = Cloudinary::Uploader.upload("spec/favicon.ico", :tags => [TEST_TAG, TIMESTAMP_TAG])
       @resource_2_id = result["public_id"]
     end
@@ -48,6 +100,14 @@ describe Cloudinary::Uploader do
       @resource_2_id = @resource_1_id+"2" # if rename doesn't fail, this is the new ID
       expect { Cloudinary::Uploader.rename(id, @resource_1_id+"2") }.to raise_error(CloudinaryException)
       @resource_2_id = id
+    end
+    it 'should allow changing type of an uploaded resource' do
+      id = @resource_2_id
+      from_type = @resource_1_type
+      to_type = "private"
+      Cloudinary::Uploader.rename(id, id, :type => from_type, :to_type => to_type)
+      expect(Cloudinary::Api.resource(id, type: to_type)).to_not be_empty
+      Cloudinary::Uploader.rename(id, id, :type => to_type, :to_type => from_type)
     end
     context ':overwrite => true' do
       it 'should rename to an existing ID' do
@@ -77,7 +137,7 @@ describe Cloudinary::Uploader do
     expect(RestClient::Request).to receive(:execute).with(deep_hash_value( [:payload, :public_id] => "sample", [:payload, :eager] => "c_scale,w_2.0"))
     result = Cloudinary::Uploader.explicit("sample", :type=>"upload", :eager=>[{:crop=>"scale", :width=>"2.0"}])
   end
-  
+
   it "should support eager" do
     result = Cloudinary::Uploader.upload(TEST_IMG, :eager =>[{ :crop =>"scale", :width =>"2.0"}], :tags => [TEST_TAG, TIMESTAMP_TAG])
     expect(result["eager"].length).to be(1)
@@ -85,11 +145,18 @@ describe Cloudinary::Uploader do
     result = Cloudinary::Uploader.upload(TEST_IMG, :eager =>"c_scale,w_2.0", :tags => [TEST_TAG, TIMESTAMP_TAG])
     expect(result["eager"].length).to be(1)
     expect(result).to have_deep_hash_values_of(["eager", 0, "transformation"] => "c_scale,w_2.0")
-    result = Cloudinary::Uploader.upload(TEST_IMG, :eager =>["c_scale,w_2.0", { :crop =>"crop", :width =>"0.5", :format => "tiff"}], :tags => [TEST_TAG, TIMESTAMP_TAG])
-    expect(result["eager"].length).to be(2)
+    result = Cloudinary::Uploader.upload(TEST_IMG, :eager =>[
+                          "c_scale,w_2.0",
+                          { :crop =>"crop", :width =>"0.5", :format => "tiff"},
+                          [[{:crop =>"crop", :width =>"0.5"},{:angle =>90}]],
+                          [[{:crop =>"crop", :width =>"0.5"},{:angle =>90}],"tiff"]
+                      ], :tags => [TEST_TAG, TIMESTAMP_TAG])
+    expect(result["eager"].length).to be(4)
     expect(result).to have_deep_hash_values_of(
                           ["eager", 0, "transformation"] => "c_scale,w_2.0",
-                          ["eager", 1, "transformation"] => "c_crop,w_0.5/tiff"
+                          ["eager", 1, "transformation"] => "c_crop,w_0.5/tiff",
+                          ["eager", 2, "transformation"] => "c_crop,w_0.5/a_90",
+                          ["eager", 3, "transformation"] => "c_crop,w_0.5/a_90/tiff"
                       )
   end
 
@@ -106,69 +173,118 @@ describe Cloudinary::Uploader do
 
   describe "tag" do
     describe "add_tag" do
-      it "should correctly handle tags" do
+      it "should correctly add tags" do
         expected ={
             :url => /.*\/tags/,
             [:payload, :tag] => "new_tag",
-            [:payload, :public_ids] => ["some_public_id"],
+            [:payload, :public_ids] => ["some_public_id1", "some_public_id2"],
             [:payload, :command] => "add"
         }
         expect(RestClient::Request).to receive(:execute).with(deep_hash_value(expected))
 
-        Cloudinary::Uploader.add_tag( "new_tag", "some_public_id")
+        Cloudinary::Uploader.add_tag( "new_tag", ["some_public_id1", "some_public_id2"])
       end
-      describe ":exclusive" do
-        it "should support :exclusive" do
-          expected ={
-              :url => /.*\/tags/,
-              [:payload, :tag] => "new_tag",
-              [:payload, :public_ids] => ["some_public_id"],
-              [:payload, :command] => "set_exclusive"
-          }
-          expect(RestClient::Request).to receive(:execute).with(deep_hash_value(expected))
-
-          Cloudinary::Uploader.add_tag( "new_tag", "some_public_id", :exclusive => true)
-        end
-      end
-
-
-
     end
 
-      # Cloudinary::Uploader.add_tag("#{new_tag}_2", result["public_id"])
-      # expect(Cloudinary::Api.resource(result["public_id"])["tags"]).to match_array(["#{new_tag}_1", "#{new_tag}_2", TEST_TAG, TIMESTAMP_TAG])
-      # Cloudinary::Uploader.remove_tag("#{new_tag}_1", result["public_id"])
-      # expect(Cloudinary::Api.resource(result["public_id"])["tags"]).to match_array(["#{new_tag}_2", TEST_TAG, TIMESTAMP_TAG])
-      # Cloudinary::Uploader.replace_tag("#{new_tag}_3", result["public_id"])
-      # expect(Cloudinary::Api.resource(result["public_id"])["tags"]).to match_array(["#{new_tag}_3"])
+    describe "remove_tag" do
+      it "should correctly remove tag" do
+        expected ={
+            :url => /.*\/tags/,
+            [:payload, :tag] => "tag",
+            [:payload, :public_ids] => ["some_public_id1", "some_public_id2"],
+            [:payload, :command] => "remove"
+        }
+        expect(RestClient::Request).to receive(:execute).with(deep_hash_value(expected))
+
+        Cloudinary::Uploader.remove_tag("tag", ["some_public_id1", "some_public_id2"])
+      end
     end
 
+    describe "replace_tag" do
+      it "should correctly replace tag" do
+        expected ={
+            :url => /.*\/tags/,
+            [:payload, :tag] => "tag",
+            [:payload, :public_ids] => ["some_public_id1", "some_public_id2"],
+            [:payload, :command] => "replace"
+        }
+        expect(RestClient::Request).to receive(:execute).with(deep_hash_value(expected))
 
-  
+        Cloudinary::Uploader.replace_tag("tag", ["some_public_id1", "some_public_id2"])
+      end
+    end
+
+    describe "remove_all_tags" do
+      it "should correctly remove all tags" do
+        expected ={
+            :url => /.*\/tags/,
+            [:payload, :public_ids] => ["some_public_id1", "some_public_id2"],
+            [:payload, :command] => "remove_all"
+        }
+        expect(RestClient::Request).to receive(:execute).with(deep_hash_value(expected))
+
+        Cloudinary::Uploader.remove_all_tags(["some_public_id1", "some_public_id2"])
+      end
+    end
+
+  end
+
+
+  describe "context" do
+    describe "add_context" do
+      it "should correctly add context" do
+        expected ={
+            :url => /.*\/context/,
+            [:payload, :context] => "key1=value1|key2=val\\|ue2",
+            [:payload, :public_ids] => ["some_public_id1", "some_public_id2"],
+            [:payload, :command] => "add"
+        }
+        expect(RestClient::Request).to receive(:execute).with(deep_hash_value(expected))
+
+        Cloudinary::Uploader.add_context( {:key1 => "value1", :key2 => "val|ue2"}, ["some_public_id1", "some_public_id2"])
+      end
+    end
+
+    describe "remove_all_context" do
+      it "should correctly remove all context" do
+        expected ={
+            :url => /.*\/context/,
+            [:payload, :public_ids] => ["some_public_id1", "some_public_id2"],
+            [:payload, :command] => "remove_all",
+            [:payload, :type] => "private"
+
+        }
+        expect(RestClient::Request).to receive(:execute).with(deep_hash_value(expected))
+
+        Cloudinary::Uploader.remove_all_context(["some_public_id1", "some_public_id2"], :type => "private")
+      end
+    end
+  end
+
   it "should correctly handle unique_filename" do
     result = Cloudinary::Uploader.upload(TEST_IMG, :use_filename => true, :tags => [TEST_TAG, TIMESTAMP_TAG])
     expect(result["public_id"]).to match(/logo_[a-zA-Z0-9]{6}/)
     result = Cloudinary::Uploader.upload(TEST_IMG, :use_filename => true, :unique_filename => false, :tags => [TEST_TAG, TIMESTAMP_TAG])
     expect(result["public_id"]).to eq("logo")
   end
-  
+
   it "should allow whitelisted formats if allowed_formats", :allowed=>true do
     result = Cloudinary::Uploader.upload(TEST_IMG, :allowed_formats => ["png"], :tags => [TEST_TAG, TIMESTAMP_TAG])
     expect(result["format"]).to eq("png")
   end
-  
+
   it "should prevent non whitelisted formats from being uploaded if allowed_formats is specified", :allowed=>true do
     expect{Cloudinary::Uploader.upload(TEST_IMG, :allowed_formats => ["jpg"], :tags => [TEST_TAG, TIMESTAMP_TAG])}.to raise_error(CloudinaryException)
   end
-  
+
   it "should allow non whitelisted formats if type is specified and convert to that type", :allowed=>true do
     result = Cloudinary::Uploader.upload(TEST_IMG, :allowed_formats => ["jpg"], :format => "jpg", :tags => [TEST_TAG, TIMESTAMP_TAG])
     expect(result["format"]).to eq("jpg")
   end
-  
+
   it "should allow sending face coordinates" do
     coordinates = [[120, 30, 109, 150], [121, 31, 110, 151]]
-    result_coordinates = [[120, 30, 109, 51], [121, 31, 110, 51]]
+    result_coordinates = [[120, 30, 109, 51], [121, 31, 110, 51]] # actual boundaries fitted by the server
     result = Cloudinary::Uploader.upload(TEST_IMG, { :face_coordinates => coordinates, :faces => true, :tags => [TEST_TAG, TIMESTAMP_TAG]})
     expect(result["faces"]).to eq(result_coordinates)
 
@@ -177,34 +293,37 @@ describe Cloudinary::Uploader do
     info = Cloudinary::Api.resource(result["public_id"], {:faces => true})
     expect(info["faces"]).to eq(different_coordinates)
   end
-  
+
   it "should allow sending context" do
-    context = {"caption" => "some caption", "alt" => "alternative"}
+    context = {"key1"=>'value1', "key2" => 'valu\e2', "key3" => 'val=u|e3', "key4" => 'val\=ue'}
     result = Cloudinary::Uploader.upload(TEST_IMG, { :context => context, :tags => [TEST_TAG, TIMESTAMP_TAG]})
     info = Cloudinary::Api.resource(result["public_id"], {:context => true})
     expect(info["context"]).to eq({"custom" => context})
   end
-  
+
   it "should support requesting manual moderation" do
     result = Cloudinary::Uploader.upload(TEST_IMG, { :moderation => :manual, :tags => [TEST_TAG, TIMESTAMP_TAG]})
     expect(result["moderation"][0]["status"]).to eq("pending")
     expect(result["moderation"][0]["kind"]).to eq("manual")
   end
-    
+
+  it "should support requesting ocr anlysis" do
+    expect(RestClient::Request).to receive(:execute) do |options|
+      expect(options[:payload][:ocr]).to eq(:adv_ocr)
+    end
+    Cloudinary::Uploader.upload(TEST_IMG, { :ocr => :adv_ocr, :tags => [TEST_TAG, TIMESTAMP_TAG]})
+  end
+
   it "should support requesting raw conversion" do
-    expect{Cloudinary::Uploader.upload("spec/docx.docx", {:resource_type => :raw, :raw_convert => :illegal, :tags => [TEST_TAG, TIMESTAMP_TAG]})}.to raise_error(CloudinaryException, /Illegal value|not a valid/)
+    expect{Cloudinary::Uploader.upload(TEST_RAW, {:resource_type => :raw, :raw_convert => :illegal, :tags => [TEST_TAG, TIMESTAMP_TAG]})}.to raise_error(CloudinaryException, /Illegal value|not a valid|is invalid/)
   end
-  
+
   it "should support requesting categorization" do
-    expect{Cloudinary::Uploader.upload(TEST_IMG, { :categorization => :illegal, :tags => [TEST_TAG, TIMESTAMP_TAG]})}.to raise_error(CloudinaryException, /Illegal value|not a valid|is invalid/)
+    expect{Cloudinary::Uploader.upload(TEST_IMG, { :categorization => :illegal, :tags => [TEST_TAG, TIMESTAMP_TAG]})}.to raise_error(CloudinaryException, /Illegal value|not a valid|is not valid/)
   end
-  
+
   it "should support requesting detection" do
-    expect{Cloudinary::Uploader.upload(TEST_IMG, { :detection => :illegal, :tags => [TEST_TAG, TIMESTAMP_TAG]})}.to raise_error(CloudinaryException, /Illegal value|not a valid/)
-  end
-  
-  it "should support requesting auto_tagging" do
-    expect{Cloudinary::Uploader.upload(TEST_IMG, { :auto_tagging => 0.5, :tags => [TEST_TAG, TIMESTAMP_TAG]})}.to raise_error(CloudinaryException, /Must use/)
+    expect{Cloudinary::Uploader.upload(TEST_IMG, { :detection => :illegal, :tags => [TEST_TAG, TIMESTAMP_TAG]})}.to raise_error(CloudinaryException, /Detection is invalid/)
   end
 
   it "should support upload_large", :large => true do
@@ -222,12 +341,28 @@ describe Cloudinary::Uploader do
     expect(result["height"]).to eq(1400)
     expect(result["format"]).to eq("bmp")
   end
-  
+
+  it "should allow fallback of upload large with remote url to regular upload" do
+    file = "http://cloudinary.com/images/old_logo.png"
+    result = Cloudinary::Uploader.upload_large(file, :chunk_size => 5243000, :tags => [TEST_TAG, TIMESTAMP_TAG])
+    expect(result).to_not be_nil
+    expect(result["width"]).to eq(TEST_IMG_W)
+    expect(result["height"]).to eq(TEST_IMG_H)
+  end
+
+  it "should include special headers in upload_large" do
+    expect(RestClient::Request).to receive(:execute) do |options|
+      expect(options[:headers]["Content-Range"]).to_not be_empty
+      expect(options[:headers]["X-Unique-Upload-Id"]).to_not be_empty
+    end
+    Cloudinary::Uploader.upload_large(TEST_IMG, { :tags => [TEST_TAG, TIMESTAMP_TAG]})
+  end
+
   context "unsigned" do
     after do
       Cloudinary.class_variable_set(:@@config, nil)
     end
-    
+
     it "should support unsigned uploading using presets", :upload_preset => true do
       preset = Cloudinary::Api.create_upload_preset(:folder => "test_folder_upload", :unsigned => true, :tags => [TEST_TAG, TIMESTAMP_TAG])
 
@@ -254,18 +389,41 @@ describe Cloudinary::Uploader do
     it "should fail if timeout is reached" do
       expect{Cloudinary::Uploader.upload(Pathname.new(TEST_IMG), :tags => [TEST_TAG, TIMESTAMP_TAG])}.to raise_error(RestClient::RequestTimeout)
     end
+
+    it "should allow passing nil value" do
+      expect(RestClient::Request).to receive(:execute) do |args|
+        expect(args[:timeout]).to be nil
+      end
+      Cloudinary::Uploader.upload(TEST_IMG, :timeout => nil)
+    end
+
+    it "should fall back to default timeout" do
+      Cloudinary.config.delete_field(:timeout)
+      expect(RestClient::Request).to receive(:execute) do |args|
+        expect(args[:timeout]).to eq(60)
+      end
+      Cloudinary::Uploader.upload(TEST_IMG)
+    end
   end
 
   context ":responsive_breakpoints" do
-    context ":create_derived" do
-      result = Cloudinary::Uploader.upload(TEST_IMG, :responsive_breakpoints => { :create_derived => false }, :tags => [TEST_TAG, TIMESTAMP_TAG])
-      it 'should return a responsive_breakpoints in the response' do
-        expect(result).to include('responsive_breakpoints')
+    context ":create_derived with transformation and format conversion" do
+      expected ={
+          :url => /.*\/upload$/,
+          [:payload, :responsive_breakpoints] => %r("transformation":"e_sepia/jpg"),
+          [:payload, :responsive_breakpoints] => %r("transformation":"gif"),
+          [:payload, :responsive_breakpoints] => %r("create_derived":true)
+      }
+      it 'should return a proper responsive_breakpoints hash in the response' do
+        expect(RestClient::Request).to receive(:execute).with(deep_hash_value(expected))
+        Cloudinary::Uploader.upload(TEST_IMG, responsive_breakpoints:[{transformation:{effect: "sepia"}, format:"jpg", bytes_step:20000, create_derived: true, :min_width => 200, :max_width => 1000, :max_images => 20},{format:"gif", create_derived:true, bytes_step:20000, :min_width => 200, :max_width => 1000, :max_images => 20}], :tags => [TEST_TAG, TIMESTAMP_TAG])
       end
     end
   end
-  describe 'explicit' do
 
+
+
+  describe 'explicit' do
     context ":invalidate" do
       it 'should pass the invalidate value to the server' do
         expect(RestClient::Request).to receive(:execute).with(deep_hash_value( [:payload, :invalidate] => 1))
@@ -274,4 +432,3 @@ describe Cloudinary::Uploader do
     end
   end
 end
-

@@ -1,4 +1,5 @@
 require 'rest_client'
+require 'json'
 
 class Cloudinary::Api
   class Error < CloudinaryException; end
@@ -9,14 +10,19 @@ class Cloudinary::Api
   class BadRequest < Error; end
   class GeneralError < Error; end
   class AuthorizationRequired < Error; end
+
   class Response < Hash
     attr_reader :rate_limit_reset_at, :rate_limit_remaining, :rate_limit_allowed
 
-    def initialize(response)
-      self.update(Cloudinary::Api.send(:parse_json_response, response))
-      @rate_limit_allowed   = response.headers[:x_featureratelimit_limit].to_i
-      @rate_limit_reset_at  = Time.parse(response.headers[:x_featureratelimit_reset])
-      @rate_limit_remaining = response.headers[:x_featureratelimit_remaining].to_i
+    def initialize(response=nil)
+      if response
+        # This sets the instantiated self as the response Hash
+        update Cloudinary::Api.parse_json_response response
+
+        @rate_limit_allowed   = response.headers[:x_featureratelimit_limit].to_i if response.headers[:x_featureratelimit_limit]
+        @rate_limit_reset_at  = Time.parse(response.headers[:x_featureratelimit_reset]) if response.headers[:x_featureratelimit_reset]
+        @rate_limit_remaining = response.headers[:x_featureratelimit_remaining].to_i if response.headers[:x_featureratelimit_remaining]
+      end
     end
   end
 
@@ -72,7 +78,21 @@ class Cloudinary::Api
     resource_type = options[:resource_type] || "image"
     type          = options[:type] || "upload"
     uri           = "resources/#{resource_type}/#{type}/#{public_id}"
-    call_api(:get, uri, only(options, :colors, :exif, :faces, :image_metadata, :pages, :phash, :coordinates, :max_results), options)
+    call_api(:get, uri,
+             only(options,
+                  :cinemagraph_analysis,
+                  :colors,
+                  :coordinates,
+                  :exif,
+                  :faces,
+                  :image_metadata,
+                  :max_results,
+                  :pages,
+                  :phash,
+                  :quality_analysis,
+                  :derived_next_cursor,
+                  :accessibility_analysis
+             ), options)
   end
 
   def self.restore(public_ids, options={})
@@ -87,18 +107,21 @@ class Cloudinary::Api
     type           = options[:type] || "upload"
     uri            = "resources/#{resource_type}/#{type}/#{public_id}"
     update_options = {
-      :tags               => options[:tags] && Cloudinary::Utils.build_array(options[:tags]).join(","),
-      :context            => Cloudinary::Utils.encode_hash(options[:context]),
-      :face_coordinates   => Cloudinary::Utils.encode_double_array(options[:face_coordinates]),
-      :custom_coordinates => Cloudinary::Utils.encode_double_array(options[:custom_coordinates]),
-      :moderation_status  => options[:moderation_status],
-      :raw_convert        => options[:raw_convert],
-      :ocr                => options[:ocr],
-      :categorization     => options[:categorization],
-      :detection          => options[:detection],
-      :similarity_search  => options[:similarity_search],
+      :access_control     => Cloudinary::Utils.json_array_param(options[:access_control]),
+      :auto_tagging       => options[:auto_tagging] && options[:auto_tagging].to_f,
       :background_removal => options[:background_removal],
-      :auto_tagging       => options[:auto_tagging] && options[:auto_tagging].to_f
+      :categorization     => options[:categorization],
+      :context            => Cloudinary::Utils.encode_context(options[:context]),
+      :custom_coordinates => Cloudinary::Utils.encode_double_array(options[:custom_coordinates]),
+      :detection          => options[:detection],
+      :face_coordinates   => Cloudinary::Utils.encode_double_array(options[:face_coordinates]),
+      :moderation_status  => options[:moderation_status],
+      :notification_url   => options[:notification_url],
+      :quality_override   => options[:quality_override],
+      :ocr                => options[:ocr],
+      :raw_convert        => options[:raw_convert],
+      :similarity_search  => options[:similarity_search],
+      :tags               => options[:tags] && Cloudinary::Utils.build_array(options[:tags]).join(",")
     }
     call_api(:post, uri, update_options, options)
   end
@@ -158,7 +181,7 @@ class Cloudinary::Api
   end
 
   def self.transformations(options={})
-    call_api(:get, "transformations", only(options, :next_cursor, :max_results), options)
+    call_api(:get, "transformations", only(options, :named, :next_cursor, :max_results), options)
   end
 
   def self.transformation(transformation, options={})
@@ -206,11 +229,21 @@ class Cloudinary::Api
   end
 
   def self.root_folders(options={})
-    call_api(:get, "folders", {}, options)
+    params = only(options, :max_results, :next_cursor)
+    call_api(:get, "folders", params, options)
   end
 
   def self.subfolders(of_folder_path, options={})
-    call_api(:get, "folders/#{of_folder_path}", {}, options)
+    params = only(options, :max_results, :next_cursor)
+    call_api(:get, "folders/#{of_folder_path}", params, options)
+  end
+
+  def self.delete_folder(path, options={})
+    call_api(:delete, "folders/#{path}", {}, options)
+  end
+
+  def self.create_folder(folder_name, options={})
+    call_api(:post, "folders/#{folder_name}", {}, options)
   end
 
   def self.upload_mappings(options={})
@@ -303,6 +336,18 @@ class Cloudinary::Api
       update_resources_access_mode(access_mode, :public_ids, public_ids, options)
   end
 
+  def self.get_breakpoints(public_id, options)
+    local_options = options.clone
+    base_transformation = Cloudinary::Utils.generate_transformation_string(local_options)
+    srcset = local_options[:srcset]
+    breakpoints = [:min_width, :max_width, :bytes_step, :max_images].map {|k| srcset[k]}.join('_')
+
+
+    local_options[:transformation] = [base_transformation, width: "auto:breakpoints_#{breakpoints}:json"]
+    json_url = Cloudinary::Utils.cloudinary_url public_id, local_options
+    call_json_api('GET', json_url, {}, 60, {})
+  end
+
   protected
 
   def self.call_api(method, uri, params, options)
@@ -311,28 +356,39 @@ class Cloudinary::Api
     api_key    = options[:api_key] || Cloudinary.config.api_key || raise("Must supply api_key")
     api_secret = options[:api_secret] || Cloudinary.config.api_secret || raise("Must supply api_secret")
     timeout    = options[:timeout] || Cloudinary.config.timeout || 60
+    uri = Cloudinary::Utils.smart_escape(uri)
     api_url    = [cloudinary, "v1_1", cloud_name, uri].join("/")
     # Add authentication
     api_url.sub!(%r(^(https?://)), "\\1#{api_key}:#{api_secret}@")
 
-    RestClient::Request.execute(:method => method, :url => api_url, :payload => params.reject { |k, v| v.nil? || v=="" }, :timeout => timeout, :headers => { "User-Agent" => Cloudinary::USER_AGENT }) do
+    headers = { "User-Agent" => Cloudinary::USER_AGENT }
+    if options[:content_type]== :json
+      payload = params.to_json
+      headers.merge!("Content-Type"=> 'application/json', "Accept"=> 'application/json')
+    else
+      payload = params.reject { |k, v| v.nil? || v=="" }
+    end
+    call_json_api(method, api_url, payload, timeout, headers)
+  end
+
+  def self.call_json_api(method, api_url, payload, timeout, headers)
+    RestClient::Request.execute(:method => method, :url => api_url, :payload => payload, :timeout => timeout, :headers => headers) do
     |response, request, tmpresult|
       return Response.new(response) if response.code == 200
       exception_class = case response.code
-      when 400 then BadRequest
-      when 401 then AuthorizationRequired
-      when 403 then NotAllowed
-      when 404 then NotFound
-      when 409 then AlreadyExists
-      when 420 then RateLimited
-      when 500 then GeneralError
-      else raise GeneralError.new("Server returned unexpected status code - #{response.code} - #{response.body}")
-      end
+                        when 400 then BadRequest
+                        when 401 then AuthorizationRequired
+                        when 403 then NotAllowed
+                        when 404 then NotFound
+                        when 409 then AlreadyExists
+                        when 420 then RateLimited
+                        when 500 then GeneralError
+                        else raise GeneralError.new("Server returned unexpected status code - #{response.code} - #{response.body}")
+                        end
       json = parse_json_response(response)
       raise exception_class.new(json["error"]["message"])
     end
   end
-
   def self.parse_json_response(response)
     return Cloudinary::Utils.json_decode(response.body)
   rescue => e
@@ -355,6 +411,24 @@ class Cloudinary::Api
 
   def self.transformation_string(transformation)
     transformation.is_a?(String) ? transformation : Cloudinary::Utils.generate_transformation_string(transformation.clone)
+  end
+
+  def self.publish_resources(options = {})
+    resource_type = options[:resource_type] || "image"
+    params = only(options, :public_ids, :prefix, :tag, :type, :overwrite, :invalidate)
+    call_api("post", "resources/#{resource_type}/publish_resources", params, options)
+  end
+
+  def self.publish_by_prefix(prefix, options = {})
+    return self.publish_resources(options.merge(:prefix => prefix))
+  end
+
+  def self.publish_by_tag(tag, options = {})
+    return self.publish_resources(options.merge(:tag => tag))
+  end
+
+  def self.publish_by_ids(publicIds, options = {})
+    return self.publish_resources(options.merge(:public_ids => publicIds))
   end
 
   def self.update_resources_access_mode(access_mode, by_key, value, options = {})

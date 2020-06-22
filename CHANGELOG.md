@@ -1,4 +1,295 @@
 
+1.15.0 / 2020-06-11
+===================
+
+New functionality and features
+------------------------------
+
+  * Add support for `accessibility_analysis` parameter
+  
+Other Changes
+-------------
+  * Fix `download` function in `Cloudinary::CarrierWave`
+  * Fix handling of empty value in `if` parameter
+  * Fix consumption of configuration from environment variables
+
+1.14.0 / 2020-05-06
+===================
+
+New functionality and features
+------------------------------
+
+  * Add support of global folder in ActiveStorage
+  * Add duration to conditions in video
+
+Other Changes
+-------------
+
+  * Fix `URI.unescape is obsolete` warning
+  * Fix lingering Rails 6 autoload warnings
+  * Fix Ruby 1.9 CI build
+  * Allow setting uploader timeout to `nil`
+  * Update link to CarrierWave integration
+  * Update issue templates
+
+1.13.2 / 2020-01-19
+===================
+
+  * Fix asset extension detection in active storage service `url` method
+
+1.13.1 / 2019-11-24
+===================
+
+  * Remove `test_files` from `gemspec`
+  * Remove redundant binary files from `active_storage` spec
+  * Fix `rspec` deprecation warnings in Rails 6
+  * Add test for uploading IO
+
+1.13.0 / 2019-11-14
+===================
+
+New functionality and features
+------------------------------
+  * Add `SassC` `cloudinary-url` function
+  
+Other Changes
+-------------
+
+  * Fix ActiveStorage download not using `ssl` for `https`
+  * Fix resource type detection in ActiveStorage
+  * Fix `storage_type` instance method in `Cloudinary::CarrierWave` module
+  * Fix sample project, limit sqlite3 to a compatible version
+
+1.12.0 / 2019-10-02
+=============
+
+New functionality and features
+------------------------------
+
+  * Add Cloudinary service for ActiveStorage
+  * Add `create_folder` Admin API method
+  * Add `delete_folder` Admin API method
+  * Add `cinemagraph_analysis` to `upload`, `explicit` and `resource` API methods
+  * Add `font_antialiasing` and `font_hinting` text style parameters
+  * Add `derived_next_cursor` parameter to `resource` Admin API
+  * Add `next_cursor` and `max_results` for `root_folders` and `subfolders` Admin API functions
+  * Add `jpeg` to `IMAGE_FORMATS`
+  * Add `pow` transformation operator
+  * Add `force_version` to `cloudinary_url`
+  * Support per corner values for the `radius` transformation parameter
+  * Support using multiple resource types when generating archives
+  * Support Google Storage fetch URL
+  
+Other Changes
+-------------
+  * Ensure `CLOUDINARY_URL` starts with `cloudinary://`
+  * Reduce memory usage in `Cloudinary::Utils.cloudinary_url`
+  * Encode URL in Admin API methods
+  * Fix base64 data validation
+  * Return `video` as the `resource_type` for audio files
+  * Add language and platform version for ruby/rails user agent
+  * Fix TravisCI configuration for ruby 1.9
+  
+
+1.11.1 / 2018-12-22
+===================
+
+  * Merge pull request #330 from langsharpe/constant_nil_is_deprecated
+    * Replace `NIL` with `Nil` to fix ruby 2.4 deprecation warning
+
+1.11.0 / 2018-12-12
+===================
+
+New functionality and features
+------------------------------
+
+  * Support new parameters and values:
+      * `auto` keyword in the `start_offset` 
+      * `art` artistic effect
+      * `fps`
+      * `quality_analysis`
+      * `quality_override`
+      * `pre` custom function transformation 
+  * Add namespace to the cloudinary controller to avoiding conflicts (#319)
+
+Other Changes
+-------------
+
+  * Add "Join the Community"
+  * Merge pull request #290 from zenspider/fix_carrierwave_deps
+      * Fixed direct references to ::CarrierWave with `defined?` guards.
+      * Fix debugging output to use mutex so output isn't garbled.
+
+1.10.1-rc / 2018-11-20
+======================
+
+  * Fix transformation list test
+  * Fix detection test
+  * Remove encrypted variables from .travis.yml
+  * Update dependencies
+  * Support "pre" versions in update_version
+
+1.10.0 / 2018-11-08
+===================
+
+New functionality and features
+------------------------------
+
+  * Add the `custom_function` transformation parameter
+  * Add Picture and source tags
+  * Add `srcset` attribute to image tag
+  * Add support for overlays of type fetch
+  * Add breakpoints cache
+
+Other Changes
+-------------
+
+  * Add `update_version` script
+  * Fix transformations test
+  * Replace ruby list notation to support older ruby versions
+  * Refactor tests
+  * Replace REXML  with Nokogiri
+  * Un-ignore the lib folder
+  * Ignore empty transformations when processing an array of transformations
+  * Restore configuration after each test
+  * Limit Rack version to fix compatibility issues with ruby 1.9.3
+  * Fix context escaping in call_context_api
+  * Fix uploadLarge to use X-Unique-Upload-Id
+  * Add test cases of OCR for upload and URL generation
+  * Add test case of conditional tags
+  * Fix expected result in cname with cdn_subdomain test
+  * Fix raw conversion test
+  * Raise exception when api-secret is missing in signed-url flow
+
+1.9.1 / 2018-03-06
+==================
+
+  * Add instructions for using the source code. Fixes #291 and #292
+  * Fix check for CarrierWave in `Migrator`. Fixes #286
+  * Fix acl and url escaping in auth_token generation
+
+1.9.0 / 2018-02-27
+==================
+
+New functionality and features
+------------------------------
+
+  * Add `access_control` parameter to `upload` and `update`
+  * Add `format` to CarrierWave plug-in's `PreloadedFile` 
+
+Other Changes
+-------------
+
+  * Fix upload categorization test
+
+1.8.3 / 2018-02-04
+==================
+
+  * Suppress warnings in tests
+  * Support symbols in `context`
+  * Remove `auto_tagging` failure test
+  * Fix fully_unescape
+  * Whitespace
+  * Fixed CW versions to use stored_version of original PR #263
+
+1.8.2 / 2017-11-22
+==================
+
+  * Fix URL signature
+  * Use the correct method for updating a column
+  * Add support for `named` parameter in list transformation API
+  * load environment when running sync_static task
+  * Fix the overwritten initializer for hash (#273)
+  * Force TravisCI to install bundler
+  * Fix CloudinaryFile::exists? method. Solves #193 #205
+  * Update Readme to point to HTTPS URLs of cloudinary.com
+
+1.8.1 / 2017-05-16
+==================
+
+  * Fix `image_path`. Fixes #257
+  * Add Auto Gravity modes tests.
+  * Use correct values in Search tests
+
+1.8.0 / 2017-05-01
+==================
+
+New functionality and features
+------------------------------
+
+  * Add Search API
+  * Sync static for non image assets (#241) fixes #27
+
+Other Changes
+-------------
+
+  * Fix Carrierwave signed URL.
+
+1.7.0 / 2017-04-09
+==================
+
+New functionality and features
+------------------------------
+
+  * Added resource publishing API
+    * `Api.publish_by_prefix`
+    * `Api.publish_by_tag`
+    * `Api.publish_by_ids`
+  * Support remote URLs in `Uploader.upload_large` API
+  * Add missing parameters to generate-archive
+    * `skip_transformation_name`
+    * `allow_missing`
+  * Added context API methods
+    * `Api.add_context`
+    * `Api.remove_all_context`
+  * Added `Uploader.remove_all_tags` method
+  * Support URL SEO suffix for authenticated images
+  * Add support of "format" parameter to responsive-breakpoints hash
+  * Add notification_url to update API
+  
+
+Other Changes
+-------------
+
+  * Remove tag from test
+  * Change test criteria from changing versions to bytes
+  * Use `TRAVIS_JOB_ID` if available or random. Move auth test constants to spec_helper.
+  * Add test for deleting public IDs which contain commas
+  * Move expression and replacement to constants
+  * Don't normalize negative numbers
+  * Added generic aliasing to methods named with image
+  * Added Private annotation to certain utility methods
+  * Add `encode_context` method to `Utils`
+  * Escape = and | characters in context values + test
+  * Add more complex eager test cases
+  * Switch alias_method_chain to alias_method to support Rails version >5.1
+
+1.6.0 / 2017-03-08
+==================
+
+New functionality and features
+------------------------------
+
+  * Support user defined variables
+  * Add `to_type` parameter to the rename method (#236)
+  * Add `async` parameter to the upload method (#235)
+
+Other Changes
+-------------
+
+  * Switch ow & oh to iw & ih on respective test case
+  * test auto gravity transformation in URL build
+
+1.5.2 / 2017-02-22
+==================
+
+  * Support URL Authorization token. 
+  * Rename auth_token. 
+  * Support nested keys in CLOUDINARY_URL
+  * Support "authenticated" url without a signature.
+  * Add OpenStruct from ruby 2.0.
+  * Add specific rubyzip version for ruby 1.9
+
 1.5.1 / 2017-02-13
 ==================
   * Fix Carrierwave 1.0.0 integration: broken `remote_image_url`

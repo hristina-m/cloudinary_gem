@@ -1,6 +1,6 @@
 source 'https://rubygems.org'
 
-gem 'rails', '3.2.21'
+gem 'rails', '~> 6.0.3'
 gem 'sqlite3'
 gem 'jquery-rails'
 
@@ -16,5 +16,3 @@ gem 'test-unit'
 # Optional - turbolinks support
 #gem 'turbolinks'
 #gem 'jquery-turbolinks'
-
-

@@ -1,7 +1,8 @@
 class Cloudinary::CarrierWave::Storage < ::CarrierWave::Storage::Abstract
 
   def store!(file)
-    return if !uploader.enable_processing
+    return unless uploader.enable_processing
+
     if uploader.is_main_uploader?
       case file
       when Cloudinary::CarrierWave::PreloadedCloudinaryFile
@@ -89,7 +90,7 @@ class Cloudinary::CarrierWave::Storage < ::CarrierWave::Storage::Abstract
         uploader.model.set(column, name)
       end
     elsif defined?(Neo4j::VERSION) && Neo4j::VERSION.split(".").first.to_i >= 5
-        uploader.model.set(column, name)
+        uploader.model.write_attribute(column, name)
     elsif defined?(Sequel::Model) && uploader.model.is_a?(Sequel::Model)
       # Sequel support
       uploader.model.this.update(column => name)

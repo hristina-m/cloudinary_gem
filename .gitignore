@@ -54,4 +54,10 @@ bower.json
 # Ignore pow environment settings
 .powenv
 
+!lib/
 cloudinary.yml
+configuration.yml
+
+# Developer env
+.idea
+.vscode
